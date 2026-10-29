@@ -1,0 +1,24 @@
+{
+  "name": "chess-coach",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "postinstall": "node scripts/copy-engine.mjs"
+  },
+  "dependencies": {
+    "chess.js": "^1.0.0",
+    "react": "^18.3.1",
+    "react-chessboard": "4.7.3",
+    "react-dom": "^18.3.1",
+    "stockfish": "^17.1.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "typescript": "^5.5.0",
+    "vite": "^5.4.0"
+  }
+}
