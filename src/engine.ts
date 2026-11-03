@@ -1,6 +1,6 @@
 export type Line = { move: string; cp: number; pv: string[] }; // cp: side-to-move view
 type Opts = { depth?: number; movetime?: number; multipv?: number; skill?: number };
-export const MATE = 1000;
+export const MATE = 100000; // mate scores = MATE - n, far above any real eval
 
 export class Engine {
   private w!: Worker;

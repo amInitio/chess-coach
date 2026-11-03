@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Chess, Square } from 'chess.js';
 import { Chessboard } from 'react-chessboard';
 import { Line, MATE, getEngines } from './engine';
-import { Entry, LABELS, cap, classify, explainMove, pvToSan, summarize } from './coach';
+import { Entry, LABELS, buildFacts, cap, classify, explainMove, pvToSan, summarize } from './coach';
 import './styles.css';
 
 const LEVELS = [
@@ -84,16 +84,21 @@ export default function App() {
       const hit = top.find((l) => l.move === uci);
       const end = new Chess(fenAfter);
       let after: number;
-      if (hit) after = hit.cp;
+      let reply: string[] = []; // engine's continuation after the player's move
+      if (hit) { after = hit.cp; reply = hit.pv.slice(1); }
       else if (end.isCheckmate()) after = MATE;
       else if (end.isGameOver()) after = 0;
-      else after = -(await getEngines().ana.search(fenAfter, { depth: 12 })).lines[0].cp;
+      else {
+        const r = (await getEngines().ana.search(fenAfter, { depth: 12 })).lines[0];
+        after = -r.cp; reply = r.pv;
+      }
       if (gid !== gameId.current) return;
       const loss = Math.max(0, cap(best.cp) - cap(after));
       const label = classify(loss, uci === best.move);
       const e: Entry = {
         id: ++entryId.current, san, label, loss, fen: fenBefore, before: best.cp, after,
         bestSan: pvToSan(fenBefore, [best.move], 1)[0], line: pvToSan(fenBefore, best.pv, 4),
+        facts: buildFacts(fenBefore, uci, best.pv, reply),
       };
       setEntries((x) => [e, ...x]);
       if (label === 'inaccuracy' || label === 'mistake' || label === 'blunder') explain(e);
