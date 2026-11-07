@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { Chess, Square } from 'chess.js';
 import { Chessboard } from 'react-chessboard';
-import { Line, MATE, getEngines } from './engine';
+import { Line, MATE, getEngineState, getEngines, retryEngine, subscribeEngine } from './engine';
 import { Entry, LABELS, buildFacts, cap, classify, explainMove, pvToSan, summarize } from './coach';
 import './styles.css';
 
@@ -31,6 +31,9 @@ export default function App() {
   const [hintText, setHintText] = useState('');
   const [arrow, setArrow] = useState<[Square, Square] | null>(null);
   const [err, setErr] = useState('');
+  const [booting, setBooting] = useState(true); // engine wasm still downloading/booting
+  const [oppFailed, setOppFailed] = useState(false); // opponent search failed → offer retry
+  const st = useSyncExternalStore(subscribeEngine, getEngineState); // engine download progress / failure
 
   const patch = (id: number, p: Partial<Entry>) =>
     setEntries((xs) => xs.map((e) => (e.id === id ? { ...e, ...p } : e)));
@@ -47,7 +50,7 @@ export default function App() {
   };
 
   const oppPlay = async (gid: number, c: Side) => {
-    setThinking(true);
+    setThinking(true); setOppFailed(false);
     try {
       const L = LEVELS[level];
       const { best } = await getEngines().opp.search(game.fen(), { movetime: L.t, skill: L.skill });
@@ -56,7 +59,10 @@ export default function App() {
       setFen(game.fen());
       setHintText(''); setHintLevel(0); setArrow(null);
       if (!checkEnd(c)) startPre();
-    } catch (e) { setErr(String(e)); }
+    } catch (e) {
+      setErr((e as Error)?.message ?? String(e));
+      if (gid === gameId.current) setOppFailed(true);
+    }
     setThinking(false);
   };
 
@@ -64,10 +70,28 @@ export default function App() {
     gameId.current++;
     game.reset();
     setColor(c); setFen(game.fen()); setEntries([]); setOver(''); setSummary('');
-    setHintText(''); setHintLevel(0); setArrow(null); setErr(''); setThinking(false);
+    setHintText(''); setHintLevel(0); setArrow(null); setErr(''); setThinking(false); setOppFailed(false);
     if (c === 'w') startPre(); else oppPlay(gameId.current, c);
   };
-  useEffect(() => { newGame('w'); }, []);
+  useEffect(() => {
+    // Boot BOTH workers right away, so the wasm downloads while the user thinks
+    // (no more delayed first move) and boot failures surface immediately.
+    const E = getEngines();
+    Promise.allSettled([E.opp.whenReady(), E.ana.whenReady()]).then(() => setBooting(false));
+    newGame('w');
+  }, []);
+
+  // Retry after a failed engine download or a failed opponent search.
+  const retry = async () => {
+    setErr(''); setOppFailed(false);
+    if (getEngineState().phase === 'failed') {
+      setBooting(true);
+      await retryEngine();
+      setBooting(false);
+    }
+    if (getEngineState().phase === 'failed' || game.isGameOver()) return;
+    if (game.turn() !== color) oppPlay(gameId.current, color); else startPre();
+  };
 
   const explain = async (e: Entry) => {
     if (!key) return patch(e.id, { text: 'برای توضیح مربی، کلید Groq را در تنظیمات وارد کن.' });
@@ -102,7 +126,7 @@ export default function App() {
       };
       setEntries((x) => [e, ...x]);
       if (label === 'inaccuracy' || label === 'mistake' || label === 'blunder') explain(e);
-    } catch (x) { setErr(String(x)); }
+    } catch (x) { setErr((x as Error)?.message ?? String(x)); }
   };
 
   const onDrop = (from: Square, to: Square) => {
@@ -118,9 +142,26 @@ export default function App() {
     return true;
   };
 
+  // Takes back the player's last move. If the engine already replied, its reply goes too,
+  // so it is the player's turn again. If the engine is still thinking, that search is dropped.
+  const undo = () => {
+    if (!canUndo) return;
+    gameId.current++; // invalidates pending analysis and the engine's pending move
+    const engineReplied = game.turn() === color;
+    game.undo();
+    if (engineReplied) game.undo();
+    const restored = game.fen();
+    setFen(restored);
+    setEntries((xs) => xs.filter((e) => e.fen !== restored)); // entry fen = position before the move
+    setOver(''); setSummary(''); setThinking(false); setOppFailed(false);
+    setHintText(''); setHintLevel(0); setArrow(null); setErr('');
+    startPre();
+  };
+
   const hint = async () => {
     if (over || game.turn() !== color) return;
-    const top = await pre.current;
+    let top;
+    try { top = await pre.current; } catch { return; }
     if (!top.length) return;
     const b = top[0].move, from = b.slice(0, 2) as Square, to = b.slice(2, 4) as Square;
     const lvl = Math.min(hintLevel + 1, 3);
@@ -138,6 +179,8 @@ export default function App() {
     try { setSummary(await summarize(key, entries)); } catch (x) { setSummary((x as Error).message); }
   };
 
+  const canUndo = game.history({ verbose: true }).some((m) => m.color === color);
+
   return (
     <div className="app">
       <main className="boardcol">
@@ -153,8 +196,22 @@ export default function App() {
           />
         </div>
         <div className="status">
-          {over || (thinking ? 'حریف فکر می‌کند…' : game.turn() === color ? 'نوبت توست' : '')}
+          {over || (thinking
+            ? (booting ? 'در حال آماده‌سازی موتور… (بار اول کمی طول می‌کشد)' : 'حریف فکر می‌کند…')
+            : game.turn() === color ? 'نوبت توست' : '')}
         </div>
+        {st.phase === 'downloading' && (
+          <p className="hint" style={{ direction: 'rtl' }}>
+            در حال دانلود موتور شطرنج
+            {st.total ? ` (${Math.round((st.loaded / st.total) * 100)}٪)` : st.loaded ? ` (${(st.loaded / 1048576).toFixed(1)} مگابایت)` : ''}
+            … فقط بار اول لازم است.{st.note && ` ${st.note}`}
+          </p>
+        )}
+        {(oppFailed || st.phase === 'failed') && !over && (
+          <button onClick={retry}>
+            {st.phase === 'failed' ? 'دانلود موتور ناموفق بود — تلاش دوباره' : 'حریف جواب نداد — تلاش دوباره'}
+          </button>
+        )}
       </main>
 
       <aside className="panel">
@@ -174,6 +231,7 @@ export default function App() {
         </div>
         <div className="row">
           <button onClick={hint} disabled={!!over}>راهنما</button>
+          <button onClick={undo} disabled={!canUndo}>برگرداندن حرکت</button>
           {over && <button onClick={finish}>جمع‌بندی مربی</button>}
         </div>
         {hintText && <p className="hint">{hintText}</p>}
